@@ -21,16 +21,19 @@ if (!secret || secret.length < 32 || !databaseUrl) {
 }
 const pool = new Pool({connectionString:databaseUrl,ssl:process.env.PGSSL === 'true'?{rejectUnauthorized:true}:undefined});
 const PgSession = connectPgSimple(session);
+const PORTAL_SCHEMA = 'portal_missionario';
 if (isProd) app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'"],imgSrc:["'self'","data:"],connectSrc:["'self'"],objectSrc:["'none'"],baseUri:["'self'"],formAction:["'self'"]}}}));
 app.use(express.json({limit:'20kb'}));
-app.use(session({store:new PgSession({pool,tableName:'portal_sessions',createTableIfMissing:true}),secret,resave:false,saveUninitialized:false,name:'portal.sid',cookie:{httpOnly:true,sameSite:'lax',secure:isProd,maxAge:8*60*60*1000}}));
+app.use(session({store:new PgSession({pool,schemaName:PORTAL_SCHEMA,tableName:'portal_sessions',createTableIfMissing:true}),secret,resave:false,saveUninitialized:false,name:'portal.sid',cookie:{httpOnly:true,sameSite:'lax',secure:isProd,maxAge:8*60*60*1000}}));
 app.use('/api',rateLimit({windowMs:15*60*1000,limit:120,standardHeaders:'draft-8',legacyHeaders:false}));
 app.use('/api/login',rateLimit({windowMs:15*60*1000,limit:10,standardHeaders:'draft-8',legacyHeaders:false}));
 
 async function init(){
- await pool.query(`CREATE TABLE IF NOT EXISTS portal_users (
+ // Cria somente o esquema exclusivo do portal; não altera tabelas existentes.
+ await pool.query('CREATE SCHEMA IF NOT EXISTS portal_missionario');
+ await pool.query(`CREATE TABLE IF NOT EXISTS portal_missionario.portal_users (
  id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
  role TEXT NOT NULL CHECK(role IN ('admin','missionary')),
  password_hash TEXT NOT NULL, must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
@@ -38,11 +41,11 @@ async function init(){
  )`);
  const adminEmail=process.env.PORTAL_ADMIN_EMAIL?.trim().toLowerCase();
  const adminPassword=process.env.PORTAL_ADMIN_PASSWORD;
- const count=await pool.query("SELECT COUNT(*)::int AS n FROM portal_users WHERE role='admin'");
+ const count=await pool.query("SELECT COUNT(*)::int AS n FROM portal_missionario.portal_users WHERE role='admin'");
  if(count.rows[0].n===0){
   if(!adminEmail || !adminPassword || adminPassword.length<12) throw Error('Primeiro acesso: configure PORTAL_ADMIN_EMAIL e PORTAL_ADMIN_PASSWORD (12+ caracteres).');
   const hash=await bcrypt.hash(adminPassword,12);
-  await pool.query('INSERT INTO portal_users(name,email,role,password_hash,must_change_password) VALUES($1,$2,$3,$4,$5)', ['Administrador',adminEmail,'admin',hash,true]);
+  await pool.query('INSERT INTO portal_missionario.portal_users(name,email,role,password_hash,must_change_password) VALUES($1,$2,$3,$4,$5)', ['Administrador',adminEmail,'admin',hash,true]);
   console.log('Conta administrativa inicial criada. A troca de senha será obrigatória.');
  }
 }
@@ -55,7 +58,7 @@ const safeUser=u=>({id:u.id,name:u.name,email:u.email,role:u.role,mustChange:u.m
 
 app.get('/api/me',async(req,res)=>{
  if(!req.session.userId)return res.json({user:null});
- const r=await pool.query('SELECT id,name,email,role,must_change_password,active FROM portal_users WHERE id=$1',[req.session.userId]);
+ const r=await pool.query('SELECT id,name,email,role,must_change_password,active FROM portal_missionario.portal_users WHERE id=$1',[req.session.userId]);
  if(!r.rowCount || !r.rows[0].active){req.session.destroy(()=>{});return res.json({user:null});}
  res.json({user:safeUser(r.rows[0])});
 });
@@ -67,7 +70,7 @@ app.post('/api/login',async(req,res,next)=>{try{
  const email=String(req.body.email||'').trim().toLowerCase();
  const password=req.body.password;
  if(!validEmail(email)||typeof password!=='string')return res.status(401).json({error:'E-mail ou senha incorretos.'});
- const r=await pool.query('SELECT * FROM portal_users WHERE email=$1 AND active=true',[email]);
+ const r=await pool.query('SELECT * FROM portal_missionario.portal_users WHERE email=$1 AND active=true',[email]);
  const hash=r.rows[0]?.password_hash || '$2a$12$ZzJHmyf8X9Yv5dOozq0A2.8sG7bybHVysq5N1pbyi.2hrHytvBHIu';
  const ok=await bcrypt.compare(password,hash);
  if(!r.rowCount||!ok)return res.status(401).json({error:'E-mail ou senha incorretos.'});
@@ -80,31 +83,31 @@ app.post('/api/logout',(req,res)=>{req.session.destroy(()=>res.json({ok:true}));
 app.post('/api/change-password',requireAuth,async(req,res,next)=>{try{
  const {currentPassword,newPassword}=req.body;
  if(!validPassword(newPassword))return res.status(400).json({error:'A nova senha deve ter entre 12 e 128 caracteres.'});
- const r=await pool.query('SELECT password_hash FROM portal_users WHERE id=$1',[req.session.userId]);
+ const r=await pool.query('SELECT password_hash FROM portal_missionario.portal_users WHERE id=$1',[req.session.userId]);
  if(!r.rowCount||!await bcrypt.compare(String(currentPassword||''),r.rows[0].password_hash))return res.status(400).json({error:'Senha atual incorreta.'});
  if(currentPassword===newPassword)return res.status(400).json({error:'Escolha uma senha diferente.'});
- await pool.query('UPDATE portal_users SET password_hash=$1,must_change_password=false WHERE id=$2',[await bcrypt.hash(newPassword,12),req.session.userId]);
+ await pool.query('UPDATE portal_missionario.portal_users SET password_hash=$1,must_change_password=false WHERE id=$2',[await bcrypt.hash(newPassword,12),req.session.userId]);
  req.session.mustChange=false;res.json({ok:true});
 }catch(e){next(e);}});
 app.get('/api/missionaries',requireAuth,requireChanged,requireAdmin,async(req,res,next)=>{try{
- const r=await pool.query("SELECT id,name,email,active,must_change_password,created_at FROM portal_users WHERE role='missionary' ORDER BY name");res.json({missionaries:r.rows});
+ const r=await pool.query("SELECT id,name,email,active,must_change_password,created_at FROM portal_missionario.portal_users WHERE role='missionary' ORDER BY name");res.json({missionaries:r.rows});
 }catch(e){next(e);}});
 app.post('/api/missionaries',requireAuth,requireChanged,requireAdmin,async(req,res,next)=>{try{
  const name=String(req.body.name||'').trim();const email=String(req.body.email||'').trim().toLowerCase();const password=req.body.password;
  if(name.length<3||name.length>120||!validEmail(email)||!validPassword(password))return res.status(400).json({error:'Informe nome (3 a 120 caracteres), e-mail válido e senha provisória com 12 a 128 caracteres.'});
  const hash=await bcrypt.hash(password,12);
- const r=await pool.query("INSERT INTO portal_users(name,email,role,password_hash) VALUES($1,$2,'missionary',$3) RETURNING id,name,email,active,must_change_password",[name,email,hash]);
+ const r=await pool.query("INSERT INTO portal_missionario.portal_users(name,email,role,password_hash) VALUES($1,$2,'missionary',$3) RETURNING id,name,email,active,must_change_password",[name,email,hash]);
  res.status(201).json({missionary:r.rows[0]});
 }catch(e){if(e.code==='23505')return res.status(409).json({error:'E-mail já cadastrado.'});next(e);}});
 app.post('/api/missionaries/:id/reset',requireAuth,requireChanged,requireAdmin,async(req,res,next)=>{try{
  const password=req.body.password;
  if(!validPassword(password))return res.status(400).json({error:'A senha provisória precisa de 12 a 128 caracteres.'});
- const r=await pool.query("UPDATE portal_users SET password_hash=$1,must_change_password=true WHERE id=$2 AND role='missionary' RETURNING id",[await bcrypt.hash(password,12),req.params.id]);
+ const r=await pool.query("UPDATE portal_missionario.portal_users SET password_hash=$1,must_change_password=true WHERE id=$2 AND role='missionary' RETURNING id",[await bcrypt.hash(password,12),req.params.id]);
  if(!r.rowCount)return res.status(404).json({error:'Missionário não encontrado.'});res.json({ok:true});
 }catch(e){next(e);}});
 app.patch('/api/missionaries/:id/active',requireAuth,requireChanged,requireAdmin,async(req,res,next)=>{try{
  if(typeof req.body.active!=='boolean')return res.status(400).json({error:'Valor inválido.'});
- const r=await pool.query("UPDATE portal_users SET active=$1 WHERE id=$2 AND role='missionary' RETURNING id",[req.body.active,req.params.id]);
+ const r=await pool.query("UPDATE portal_missionario.portal_users SET active=$1 WHERE id=$2 AND role='missionary' RETURNING id",[req.body.active,req.params.id]);
  if(!r.rowCount)return res.status(404).json({error:'Missionário não encontrado.'});res.json({ok:true});
 }catch(e){next(e);}});
 app.get('/api/portal',requireAuth,requireChanged,async(req,res)=>res.json({messages:[],batches:[],integration:'not_connected'}));
