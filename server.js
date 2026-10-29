@@ -110,7 +110,24 @@ app.patch('/api/missionaries/:id/active',requireAuth,requireChanged,requireAdmin
  const r=await pool.query("UPDATE portal_missionario.portal_users SET active=$1 WHERE id=$2 AND role='missionary' RETURNING id",[req.body.active,req.params.id]);
  if(!r.rowCount)return res.status(404).json({error:'Missionário não encontrado.'});res.json({ok:true});
 }catch(e){next(e);}});
-app.get('/api/portal',requireAuth,requireChanged,async(req,res)=>res.json({messages:[],batches:[],integration:'not_connected'}));
+// Acesso somente de leitura às mensagens efetivamente enviadas pelo sistema principal.
+// A identidade é vinculada por e-mail único no cadastro principal. Se não houver
+// correspondência exata e inequívoca, nenhuma mensagem é exibida.
+app.get('/api/portal',requireAuth,requireChanged,async(req,res,next)=>{try{
+ if(req.session.role!=='missionary')return res.json({messages:[],batches:[],integration:'admin'});
+ const account=await pool.query("SELECT email FROM portal_missionario.portal_users WHERE id=$1 AND role='missionary' AND active=true",[req.session.userId]);
+ if(account.rowCount!==1)return res.status(403).json({error:'Conta indisponível.'});
+ const linked=await pool.query('SELECT id FROM public.missionarios WHERE lower(trim(email))=$1 AND ativo=true',[account.rows[0].email]);
+ if(linked.rowCount!==1)return res.json({messages:[],batches:[],integration:'unlinked'});
+ const missionaryId=linked.rows[0].id;
+ const r=await pool.query(`SELECT id,nome_familia,mensagem,email_resposta,criado_em,enviado_em
+ FROM public.mensagens_missionarios WHERE missionario_id=$1 AND status='ENVIADA' AND enviado_em IS NOT NULL
+ ORDER BY enviado_em DESC, criado_em DESC, id DESC LIMIT 1000`,[missionaryId]);
+ const messages=r.rows.map(m=>({id:m.id,sender:m.nome_familia,text:m.mensagem,replyEmail:m.email_resposta,createdAt:m.criado_em,releasedAt:m.enviado_em}));
+ const grouped=new Map();
+ for(const m of messages){const date=new Date(m.releasedAt).toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});if(!grouped.has(date))grouped.set(date,{date,count:0});grouped.get(date).count++;}
+ res.json({messages,batches:[...grouped.values()],integration:'connected'});
+}catch(e){next(e);}});
 app.use(express.static(path.join(path.dirname(fileURLToPath(import.meta.url)),'public')));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Ocorreu um erro no servidor.'});});
 init().then(()=>app.listen(PORT,()=>console.log(`Portal de testes iniciado na porta ${PORT}`))).catch(e=>{console.error(e);process.exit(1);});

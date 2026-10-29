@@ -29,3 +29,16 @@ Projeto **independente**, para ambiente de testes. Não substitui nem modifica o
 **Observações:** a conta administrativa é criada somente se ainda não existir administrador. Alterar `PORTAL_ADMIN_PASSWORD` depois não redefine a senha existente. Para testes locais, defina as variáveis de ambiente no terminal antes de executar `npm install` e `npm start`. O app requer Node.js 20+.
 
 **Segurança:** mantenha o serviço de testes privado, sem dados reais, até revisão de segurança e testes de integração. O botão "Redefinir senha" pede uma senha provisória digitada pelo administrador; transmita-a por canal seguro. A recuperação automática por e-mail será feita futuramente.
+
+
+## Integração de leitura com Mensagens Missionárias
+
+- Usa a mesma conexão Neon via `PORTAL_DATABASE_URL`.
+- Consulta `public.missionarios` e `public.mensagens_missionarios` **somente para leitura**.
+- Mostra apenas registros com `status='ENVIADA'` e `enviado_em` preenchido.
+- O e-mail da conta do portal deve ser **idêntico** ao e-mail do missionário no painel principal. Se houver zero ou mais de um cadastro principal com esse e-mail, o portal não mostra mensagens.
+- Respostas abrem o aplicativo de e-mail do missionário usando `mailto:`. **Não são enviadas automaticamente pelo servidor.**
+- O histórico agrupa mensagens por dia de envio (não há ID de compilação no banco principal).
+- O envio por Resend, a liberação manual e os dados do sistema principal não são modificados.
+- Antes do deploy, certifique-se de que o `SESSION_SECRET` tenha ao menos 32 caracteres.
+- A conta Neon compartilhada ainda tem permissões de banco; o isolamento do portal é realizado pelas consultas da aplicação, não por uma role PostgreSQL de leitura restrita.
