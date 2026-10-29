@@ -42,3 +42,7 @@ Projeto **independente**, para ambiente de testes. Não substitui nem modifica o
 - O envio por Resend, a liberação manual e os dados do sistema principal não são modificados.
 - Antes do deploy, certifique-se de que o `SESSION_SECRET` tenha ao menos 32 caracteres.
 - A conta Neon compartilhada ainda tem permissões de banco; o isolamento do portal é realizado pelas consultas da aplicação, não por uma role PostgreSQL de leitura restrita.
+
+
+## Respostas dentro do portal
+Configure RESEND_API_KEY no serviço portal-missionario do Render (não no GitHub). O remetente padrão é Mensagens Missionárias <mensagens@mail.familycode.com.br>, desde que esteja verificado no Resend. O portal envia diretamente pelo servidor. Somente mensagens ENVIADA vinculadas ao e-mail do missionário permitem resposta. Cada mensagem admite uma resposta; em caso de resultado incerto, o envio fica bloqueado para evitar duplicidade. O registro de status 'sent' confirma aceite do Resend, não entrega na caixa do destinatário.

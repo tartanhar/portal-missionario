@@ -31,7 +31,26 @@ async function loadPortal(){
    const date=document.createElement('small');date.textContent='Enviada em '+new Date(m.releasedAt).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'});
    const body=document.createElement('p');body.textContent=m.text;body.style.whiteSpace='pre-wrap';
    card.append(head,date,body);
-   if(m.replyEmail){const reply=document.createElement('a');reply.textContent='✉ Responder por e-mail';reply.href='mailto:'+encodeURIComponent(m.replyEmail)+'?subject='+encodeURIComponent('Resposta à sua mensagem');reply.rel='noopener noreferrer';card.append(reply);}
+   if(m.replyEmail){
+    if(m.replyStatus==='sent'){const note=document.createElement('small');note.textContent='✓ Resposta enviada por e-mail';card.append(note);}
+    else if(m.replyStatus){const note=document.createElement('small');note.textContent='Resposta registrada ('+m.replyStatus+'). Para evitar duplicações, contate o administrador.';card.append(note);}
+    else {
+     const toggle=document.createElement('button');toggle.type='button';toggle.textContent='✉ Responder dentro do portal';
+     const form=document.createElement('form');form.className='reply-form hidden';
+     const label=document.createElement('label');label.textContent='Escreva sua resposta';
+     const area=document.createElement('textarea');area.required=true;area.maxLength=4000;area.rows=5;area.placeholder='Escreva sua mensagem para a família...';
+     const send=document.createElement('button');send.type='submit';send.textContent='Enviar resposta por e-mail';
+     const feedback=document.createElement('small');feedback.setAttribute('role','status');
+     form.append(label,area,send,feedback);
+     toggle.onclick=()=>{form.classList.toggle('hidden');if(!form.classList.contains('hidden'))area.focus();};
+     form.onsubmit=async e=>{e.preventDefault();if(!confirm('Enviar esta resposta para o e-mail informado pela família?'))return;
+      send.disabled=true;feedback.textContent='Enviando...';
+      try{await api('/messages/'+encodeURIComponent(m.id)+'/reply','POST',{text:area.value});feedback.textContent='Resposta enviada!';await loadPortal();}
+      catch(err){feedback.textContent=err.message;send.disabled=false;}
+     };
+     card.append(toggle,form);
+    }
+   }
    $('messageList').append(card);
   }
   for(const b of data.batches){const card=document.createElement('div');card.className='history-item';card.textContent=new Date(b.date+'T12:00:00').toLocaleDateString('pt-BR')+' · '+b.count+' mensagem(ns) liberada(s)';$('batchList').append(card);}

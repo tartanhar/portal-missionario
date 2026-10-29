@@ -39,6 +39,18 @@ async function init(){
  password_hash TEXT NOT NULL, must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
  active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
  )`);
+ await pool.query(`CREATE TABLE IF NOT EXISTS portal_missionario.portal_replies (
+ id BIGSERIAL PRIMARY KEY,
+ message_id BIGINT NOT NULL UNIQUE,
+ portal_user_id BIGINT NOT NULL REFERENCES portal_missionario.portal_users(id),
+ recipient_email TEXT NOT NULL,
+ reply_text TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('sending','sent','failed','uncertain')),
+ provider_id TEXT,
+ error_message TEXT,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ sent_at TIMESTAMPTZ
+ )`);
  const adminEmail=process.env.PORTAL_ADMIN_EMAIL?.trim().toLowerCase();
  const adminPassword=process.env.PORTAL_ADMIN_PASSWORD;
  const count=await pool.query("SELECT COUNT(*)::int AS n FROM portal_missionario.portal_users WHERE role='admin'");
@@ -123,10 +135,51 @@ app.get('/api/portal',requireAuth,requireChanged,async(req,res,next)=>{try{
  const r=await pool.query(`SELECT id,nome_familia,mensagem,email_resposta,criado_em,enviado_em
  FROM public.mensagens_missionarios WHERE missionario_id=$1 AND status='ENVIADA' AND enviado_em IS NOT NULL
  ORDER BY enviado_em DESC, criado_em DESC, id DESC LIMIT 1000`,[missionaryId]);
- const messages=r.rows.map(m=>({id:m.id,sender:m.nome_familia,text:m.mensagem,replyEmail:m.email_resposta,createdAt:m.criado_em,releasedAt:m.enviado_em}));
+ const replyRows=await pool.query('SELECT message_id,status,sent_at FROM portal_missionario.portal_replies WHERE portal_user_id=$1 AND message_id=ANY($2::bigint[])',[req.session.userId,r.rows.map(m=>m.id)]);
+ const replyMap=new Map(replyRows.rows.map(row=>[String(row.message_id),row]));
+ const messages=r.rows.map(m=>({id:m.id,sender:m.nome_familia,text:m.mensagem,replyEmail:m.email_resposta,createdAt:m.criado_em,releasedAt:m.enviado_em,replyStatus:replyMap.get(String(m.id))?.status||null,replySentAt:replyMap.get(String(m.id))?.sent_at||null}));
  const grouped=new Map();
  for(const m of messages){const date=new Date(m.releasedAt).toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});if(!grouped.has(date))grouped.set(date,{date,count:0});grouped.get(date).count++;}
  res.json({messages,batches:[...grouped.values()],integration:'connected'});
+}catch(e){next(e);}});
+// Envio de uma resposta por mensagem, exclusivamente dentro do portal.
+// O e-mail de destino vem do banco, nunca do navegador.
+app.post('/api/messages/:id/reply',requireAuth,requireChanged,async(req,res,next)=>{try{
+ if(req.session.role!=='missionary')return res.status(403).json({error:'Acesso restrito.'});
+ const messageId=String(req.params.id);
+ if(!/^\d+$/.test(messageId))return res.status(400).json({error:'Mensagem inválida.'});
+ const replyText=typeof req.body.text==='string'?req.body.text.trim():'';
+ if(replyText.length<1||replyText.length>4000)return res.status(400).json({error:'A resposta deve ter de 1 a 4000 caracteres.'});
+ if(!process.env.RESEND_API_KEY)return res.status(503).json({error:'Envio por e-mail ainda não configurado no portal.'});
+ const linked=await pool.query(`SELECT m.id,m.nome_familia,m.email_resposta
+ FROM public.mensagens_missionarios m
+ JOIN public.missionarios mission ON mission.id=m.missionario_id
+ JOIN portal_missionario.portal_users u ON lower(trim(mission.email))=u.email
+ WHERE m.id=$1 AND u.id=$2 AND u.role='missionary' AND u.active=true
+ AND mission.ativo=true AND m.status='ENVIADA' AND m.enviado_em IS NOT NULL`,[messageId,req.session.userId]);
+ if(linked.rowCount!==1)return res.status(404).json({error:'Mensagem não encontrada ou não liberada.'});
+ const message=linked.rows[0];
+ const recipient=String(message.email_resposta||'').trim();
+ if(!validEmail(recipient))return res.status(400).json({error:'Esta mensagem não possui um e-mail válido para resposta.'});
+ const reserved=await pool.query(`INSERT INTO portal_missionario.portal_replies(message_id,portal_user_id,recipient_email,reply_text,status)
+ VALUES($1,$2,$3,$4,'sending') ON CONFLICT(message_id) DO NOTHING RETURNING id`,[messageId,req.session.userId,recipient,replyText]);
+ if(!reserved.rowCount)return res.status(409).json({error:'Já existe uma resposta registrada ou em processamento para esta mensagem. Atualize a página.'});
+ const replyId=reserved.rows[0].id;
+ const sender=process.env.PORTAL_FROM_EMAIL||'Mensagens Missionárias <mensagens@mail.familycode.com.br>';
+ let response;
+ try{
+  response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{'Authorization':'Bearer '+process.env.RESEND_API_KEY,'Content-Type':'application/json','Idempotency-Key':'portal-reply-'+replyId},body:JSON.stringify({from:sender,to:[recipient],subject:'Resposta à sua mensagem para o missionário',text:replyText,reply_to:process.env.PORTAL_REPLY_TO_EMAIL||undefined}),signal:AbortSignal.timeout(20000)});
+ }catch(err){
+  await pool.query("UPDATE portal_missionario.portal_replies SET status='uncertain',error_message='Resultado do provedor não confirmado' WHERE id=$1",[replyId]);
+  return res.status(502).json({error:'Não foi possível confirmar o envio. Não tente reenviar; avise o administrador para verificar o histórico.'});
+ }
+ const result=await response.json().catch(()=>({}));
+ if(!response.ok||!result.id){
+  await pool.query("UPDATE portal_missionario.portal_replies SET status='failed',error_message=$2 WHERE id=$1",[replyId,String(result.message||'Falha no provedor').slice(0,250)]);
+  return res.status(502).json({error:'O serviço de e-mail não aceitou a resposta. Avise o administrador.'});
+ }
+ await pool.query("UPDATE portal_missionario.portal_replies SET status='sent',provider_id=$2,sent_at=now(),error_message=NULL WHERE id=$1",[replyId,result.id]);
+ res.json({ok:true,status:'sent'});
 }catch(e){next(e);}});
 app.use(express.static(path.join(path.dirname(fileURLToPath(import.meta.url)),'public')));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Ocorreu um erro no servidor.'});});
